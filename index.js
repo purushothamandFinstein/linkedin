@@ -1,6 +1,6 @@
 require('dotenv').config();
 const cron = require('node-cron');
-const axios = require('./node_modules/axios/index.d.cts');
+const axios = require('axios');
 const app = require('express');
 const bodyParser = require('body-parser');
 
