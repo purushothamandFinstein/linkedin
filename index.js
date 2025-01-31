@@ -1,126 +1,161 @@
 require('dotenv').config();
-const cron = require('node-cron');
-const axios = require('axios');
 const express = require('express');
-const app = express();
+const axios = require('axios');
+const cron = require('node-cron');
+const { createLogger, format, transports } = require('winston');
 
-
-const PORT = 3000;
-
-
-
-app.get('/', (req, res) => {
-    res.send('Hello, Node.js Server!');
+// Logger Setup
+const logger = createLogger({
+  level: 'info',
+  format: format.combine(
+    format.timestamp(),
+    format.colorize(),
+    format.printf(({ timestamp, level, message }) => `${timestamp} [${level}]: ${message}`)
+  ),
+  transports: [
+    new transports.Console(),
+    new transports.File({ filename: 'app.log' }),
+  ],
 });
 
+// Validate Environment Variables
+const REQUIRED_ENV_VARS = ['GEMINI_API_KEY', 'LINKEDIN_PERSON_ID', 'LINKEDIN_ACCESS_TOKEN', 'PORT'];
+REQUIRED_ENV_VARS.forEach((variable) => {
+  if (!process.env[variable]) {
+    logger.error(`Missing required environment variable: ${variable}`);
+    process.exit(1);
+  }
+});
 
+// LinkedIn Content Generator
+class LinkedInContentService {
+  constructor() {
+    this.geminiApiKey = process.env.GEMINI_API_KEY;
+    this.linkedinPersonId = process.env.LINKEDIN_PERSON_ID;
+    this.linkedinAccessToken = process.env.LINKEDIN_ACCESS_TOKEN;
+  }
 
-// Function to generate content using Gemini API
-async function generateLinkedInContent() {
+  // Generate AI-based content
+  async generateContent() {
+    const url = `https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key=${this.geminiApiKey}`;
+    const prompt = this.createContentPrompt();
+    const payload = { contents: [{ parts: [{ text: prompt }] }] };
+
     try {
-      const apiKey = process.env.GEMINI_API_KEY;
-      if (!apiKey) {
-        throw new Error('GEMINI_API_KEY not found in environment variables');
-      }
-  
-      const url = `https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key=${apiKey}`;
-  
-      const headers = {
-        'Content-Type': 'application/json',
-      };
-  
-      const prompt = `Create an engaging LinkedIn post about latest AI . The post should include a compelling title and a detailed description. Keep it professional, insightful, and engaging. If relevant, include a call to action for engagement.
-      also use emoji in the post for better readability and attractiveness.
-      !important: the post should be in the form of a linkedin post.
-       and don't give like this **Description:** **Title:** **Content:** avoide the stars 
-       and dont give like this **LinkedIn Post:** 
-      `;
-  
-      const payload = {
-        contents: [
-          {
-            parts: [
-              {
-                text: prompt,
-              },
-            ],
-          },
-        ],
-      };
-  
-      const response = await axios.post(url, payload, { headers });
-  
-      if (response.status === 200) {
-        const result = response.data;
-        if (result.candidates && result.candidates.length > 0) {
-          const content = result.candidates[0].content.parts[0].text;
-          resultTOsend =  await content.replace(/\*\*/g, '');
-          return resultTOsend;
-        } else {
-          console.warn('No content generated');
-          return null;
-        }
-      } else {
-        console.error(`Failed to generate content. Status: ${response.status}`);
-        return null;
-      }
+      const response = await axios.post(url, payload, { headers: { 'Content-Type': 'application/json' } });
+      return this.processGeneratedContent(response);
     } catch (error) {
-      console.error(`Error generating LinkedIn content: ${error.message}`);
+      logger.error(`Gemini API error: ${error.message}`);
       return null;
     }
   }
-  
-// Function to post content to LinkedIn
-async function postToLinkedIn(content) {
-  const postData = {
-    author: `urn:li:person:${process.env.LINKEDIN_PERSON_ID}`,
-    lifecycleState: 'PUBLISHED',
-    specificContent: {
-      'com.linkedin.ugc.ShareContent': {
-        shareCommentary: {
-          text: content,
-        },
-        shareMediaCategory: 'NONE',
-      },
-    },
-    visibility: {
-      'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC',
-    },
-  };
 
-  try {
-    const response = await axios.post(
-      'https://api.linkedin.com/v2/ugcPosts',
-      postData,
-      {
+  // Structured prompt for AI
+  createContentPrompt() {
+    return `Create an engaging LinkedIn post about the latest AI developments:
+    - Use professional and insightful language
+    - Include a compelling title
+    - Write in a LinkedIn post format
+    - Use emojis for readability
+    - Add a call to action for engagement
+    - Avoid markdown or formatting symbols`;
+  }
+
+  // Process Gemini API Response
+  processGeneratedContent(response) {
+    if (response.status !== 200 || !response.data || !response.data.candidates?.length) {
+      logger.warn(`Invalid Gemini response: ${JSON.stringify(response.data)}`);
+      return null;
+    }
+
+    try {
+      return response.data.candidates[0].content.parts[0].text.replace(/\*\*/g, ''); // Clean markdown
+    } catch (error) {
+      logger.error(`Content parsing error: ${error.message}`);
+      return null;
+    }
+  }
+
+  // Post Content to LinkedIn
+  async postToLinkedIn(content) {
+    if (!content) {
+      logger.warn('No content to post to LinkedIn.');
+      return;
+    }
+
+    const postData = {
+      author: `urn:li:person:${this.linkedinPersonId}`,
+      lifecycleState: 'PUBLISHED',
+      specificContent: {
+        'com.linkedin.ugc.ShareContent': {
+          shareCommentary: { text: content },
+          shareMediaCategory: 'NONE',
+        },
+      },
+      visibility: { 'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC' },
+    };
+
+    try {
+      const response = await axios.post('https://api.linkedin.com/v2/ugcPosts', postData, {
         headers: {
-          Authorization: `Bearer ${process.env.LINKEDIN_ACCESS_TOKEN}`,
+          Authorization: `Bearer ${this.linkedinAccessToken}`,
           'Content-Type': 'application/json',
         },
-      }
-    );
-    console.log('Successfully posted to LinkedIn:', response.data);
-  } catch (error) {
-    console.error('Error posting to LinkedIn:', error);
+      });
+
+      logger.info(`LinkedIn Post Success: ${JSON.stringify(response.data)}`);
+    } catch (error) {
+      logger.error(`LinkedIn API Error: ${error.message}`);
+    }
+  }
+
+  // Run Content Workflow
+  async runContentWorkflow() {
+    logger.info('Starting content generation and posting workflow...');
+    const content = await this.generateContent();
+    if (content) await this.postToLinkedIn(content);
   }
 }
 
-
-// Cron job to run every 3 hours
-cron.schedule('0 */3 * * *', async () => {  
-  console.log('Generating content and posting to LinkedIn...');
-  const content = await generateLinkedInContent();
-  if (content) {
-    await postToLinkedIn(content);
-  } else {
-    console.log('No content generated.');
+// Express Server
+class Server {
+  constructor() {
+    this.app = express();
+    this.port = process.env.PORT || 3000;
+    this.contentService = new LinkedInContentService();
+    this.setupRoutes();
+    this.setupCronJob();
   }
-});
 
-console.log('LinkedIn posting service started.');
+  // API Routes
+  setupRoutes() {
+    this.app.get('/', (req, res) => res.send('LinkedIn Content Generator Service'));
+    this.app.use((err, req, res, next) => {
+      logger.error(`Unhandled error: ${err.message}`);
+      res.status(500).send('Internal Server Error');
+    });
+  }
 
-app.listen(PORT, () => {
-  console.log(`Server is running on http://localhost:${PORT}`);
-});
+  // Cron Job - Runs every 5 hours
+  setupCronJob() {
+    cron.schedule('0 */5 * * *', () => this.contentService.runContentWorkflow());
+  }
+  
+  // Start the Server
+  start() {
+    this.app.listen(this.port, () => logger.info(`Server running at http://localhost:${this.port}`));
+  }
+}
 
+// Application Entry Point
+function main() {
+  try {
+    const server = new Server();
+    server.start();
+  } catch (error) {
+    logger.error(`Startup error: ${error.message}`);
+    process.exit(1);
+  }
+}
 
+main();
