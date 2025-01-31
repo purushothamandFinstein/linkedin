@@ -1,8 +1,18 @@
 require('dotenv').config();
 const cron = require('node-cron');
 const axios = require('axios');
-const app = require('express');
-const bodyParser = require('body-parser');
+const express = require('express');
+const app = express();
+
+
+const PORT = 3000;
+
+
+
+app.get('/', (req, res) => {
+    res.send('Hello, Node.js Server!');
+});
+
 
 
 // Function to generate content using Gemini API
@@ -108,5 +118,9 @@ cron.schedule('0 */3 * * *', async () => {
 });
 
 console.log('LinkedIn posting service started.');
+
+app.listen(PORT, () => {
+  console.log(`Server is running on http://localhost:${PORT}`);
+});
 
 
