@@ -117,33 +117,130 @@ class LinkedInContentService {
   }
 }
 
+// Keep-Alive Service for free hosting platforms
+class KeepAliveService {
+  constructor(port) {
+    this.serverUrl = process.env.SERVER_URL || `http://localhost:${port}`;
+    this.isEnabled = process.env.KEEP_ALIVE_ENABLED !== 'false'; // Default to true
+  }
+
+  // Self-ping to prevent server sleep
+  async pingServer() {
+    if (!this.isEnabled) return;
+
+    try {
+      const response = await axios.get(`${this.serverUrl}/health`, { timeout: 10000 });
+      logger.info(`Keep-alive ping successful: ${response.status}`);
+    } catch (error) {
+      logger.warn(`Keep-alive ping failed: ${error.message}`);
+    }
+  }
+
+  // Setup keep-alive job
+  startKeepAlive() {
+    if (!this.isEnabled) {
+      logger.info('Keep-alive service disabled');
+      return;
+    }
+
+    // Ping every 8 minutes to prevent 10-minute timeout
+    cron.schedule('*/8 * * * *', () => {
+      this.pingServer();
+    });
+
+    logger.info('Keep-alive service started - pinging every 8 minutes');
+  }
+}
+
 // Express Server
 class Server {
   constructor() {
     this.app = express();
     this.port = process.env.PORT || 3000;
     this.contentService = new LinkedInContentService();
+    this.keepAliveService = new KeepAliveService(this.port);
+    this.startTime = new Date();
     this.setupRoutes();
     this.setupCronJob();
+    this.setupKeepAlive();
   }
 
   // API Routes
   setupRoutes() {
-    this.app.get('/', (req, res) => res.send('LinkedIn Content Generator Service'));
+    // Main route
+    this.app.get('/', (req, res) => {
+      const uptime = Math.floor((Date.now() - this.startTime.getTime()) / 1000);
+      res.json({
+        service: 'LinkedIn Content Generator Service',
+        status: 'running',
+        uptime: `${uptime} seconds`,
+        started: this.startTime.toISOString(),
+        keepAlive: this.keepAliveService.isEnabled
+      });
+    });
+
+    // Health check endpoint
+    this.app.get('/health', (req, res) => {
+      res.json({
+        status: 'healthy',
+        timestamp: new Date().toISOString(),
+        uptime: Math.floor((Date.now() - this.startTime.getTime()) / 1000)
+      });
+    });
+
+    // Status endpoint with detailed info
+    this.app.get('/status', (req, res) => {
+      res.json({
+        service: 'LinkedIn Auto Poster',
+        status: 'active',
+        uptime: Math.floor((Date.now() - this.startTime.getTime()) / 1000),
+        nextPost: 'Every 5 hours',
+        keepAliveEnabled: this.keepAliveService.isEnabled,
+        environment: process.env.NODE_ENV || 'development'
+      });
+    });
+
+    // Manual trigger endpoint (for testing)
+    this.app.post('/trigger-post', async (req, res) => {
+      try {
+        logger.info('Manual post trigger requested');
+        await this.contentService.runContentWorkflow();
+        res.json({ message: 'Content workflow triggered successfully' });
+      } catch (error) {
+        logger.error(`Manual trigger error: ${error.message}`);
+        res.status(500).json({ error: 'Failed to trigger content workflow' });
+      }
+    });
+
+    // Error handler
     this.app.use((err, req, res, next) => {
       logger.error(`Unhandled error: ${err.message}`);
-      res.status(500).send('Internal Server Error');
+      res.status(500).json({ error: 'Internal Server Error' });
     });
   }
 
   // Cron Job - Runs every 5 hours
   setupCronJob() {
     cron.schedule('0 */5 * * *', () => this.contentService.runContentWorkflow());
+    logger.info('Content posting scheduled every 5 hours');
+  }
+
+  // Setup keep-alive service
+  setupKeepAlive() {
+    this.keepAliveService.startKeepAlive();
   }
   
   // Start the Server
   start() {
-    this.app.listen(this.port, () => logger.info(`Server running at http://localhost:${this.port}`));
+    this.app.listen(this.port, () => {
+      logger.info(`Server running at http://localhost:${this.port}`);
+      logger.info(`Keep-alive enabled: ${this.keepAliveService.isEnabled}`);
+      
+      // Initial ping after 2 minutes to ensure service is ready
+      setTimeout(() => {
+        this.keepAliveService.pingServer();
+      }, 120000);
+    });
   }
 }
 
